@@ -42,12 +42,32 @@ class StateList {
     async getState(key) {
         let ledgerKey = this.ctx.stub.createCompositeKey(this.name, State.splitKey(key));
         let data = await this.ctx.stub.getState(ledgerKey);
-        if (data){
-            let state = State.deserialize(data, this.supportedClasses);
-            return state;
+        if (data && data.length) {
+            return State.deserialize(data, this.supportedClasses);
         } else {
             return null;
         }
+    }
+
+    async getStatesByPartialKey(keyParts) {
+        let it = await this.ctx.stub.getStateByPartialCompositeKey(this.name, [State.makeKey(keyParts)]);
+
+        let results = [];
+
+        while (true) {
+            let queryResult = await it.next();
+
+            if (queryResult.value) {
+                let data = queryResult.value.value.toBuffer();
+
+                results.push(State.deserialize(data, this.supportedClasses));
+            }
+
+            if (queryResult.done) break;
+        }
+        await it.close();
+
+        return results;
     }
 
     /**
