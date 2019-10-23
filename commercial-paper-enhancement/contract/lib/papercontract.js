@@ -5,11 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 'use strict';
 
 // Fabric smart contract classes
-const { Contract, Context } = require('fabric-contract-api');
+const {Contract, Context} = require('fabric-contract-api');
 
 // PaperNet specifc classes
 const CommercialPaper = require('./paper.js');
+const Bid = require('./bid.js');
+const Account = require('./account.js');
 const PaperList = require('./paperlist.js');
+const BidList = require('./bidlist.js');
+const AccountList = require('./accountlist.js');
 
 /**
  * A custom context provides easy access to list of all commercial papers
@@ -20,6 +24,9 @@ class CommercialPaperContext extends Context {
         super();
         // All papers are held in a list of papers
         this.paperList = new PaperList(this);
+
+        this.bidList = new BidList(this);
+        this.accountList = new AccountList(this);
     }
 
 }
@@ -37,7 +44,7 @@ class CommercialPaperContract extends Contract {
 
     /**
      * Define a custom context for commercial paper
-    */
+     */
     createContext() {
         return new CommercialPaperContext();
     }
@@ -52,26 +59,12 @@ class CommercialPaperContract extends Contract {
         console.log('Instantiate the contract');
     }
 
-    /**
-     * Issue commercial paper
-     *
-     * @param {Context} ctx the transaction context
-     * @param {String} issuer commercial paper issuer
-     * @param {Integer} paperNumber paper number for this issuer
-     * @param {String} issueDateTime paper issue date
-     * @param {String} maturityDateTime paper maturity date
-     * @param {Integer} faceValue face value of paper
-    */
-    async issue(ctx, issuer, paperNumber, issueDateTime, maturityDateTime, faceValue) {
+    async offer(ctx, issuer, paperNumber, issueDateTime, maturityDateTime, faceValue, quantity) {
 
         // create an instance of the paper
-        let paper = CommercialPaper.createInstance(issuer, paperNumber, issueDateTime, maturityDateTime, faceValue);
+        let paper = CommercialPaper.createInstance(issuer, paperNumber, issueDateTime, maturityDateTime, faceValue, quantity);
 
-        // Smart contract, rather than paper, moves paper into ISSUED state
-        paper.setIssued();
-
-        // Newly issued paper is owned by the issuer
-        paper.setOwner(issuer);
+        paper.setOffered();
 
         // Add the paper to the list of all similar commercial papers in the ledger world state
         await ctx.paperList.addPaper(paper);
@@ -80,75 +73,185 @@ class CommercialPaperContract extends Contract {
         return paper;
     }
 
-    /**
-     * Buy commercial paper
-     *
-     * @param {Context} ctx the transaction context
-     * @param {String} issuer commercial paper issuer
-     * @param {Integer} paperNumber paper number for this issuer
-     * @param {String} currentOwner current owner of paper
-     * @param {String} newOwner new owner of paper
-     * @param {Integer} price price paid for this paper
-     * @param {String} purchaseDateTime time paper was purchased (i.e. traded)
-    */
-    async buy(ctx, issuer, paperNumber, currentOwner, newOwner, price, purchaseDateTime) {
+    async bid(ctx, paperNumber, bidder, bidDateTime, price, quantity) {
 
         // Retrieve the current paper using key fields provided
-        let paperKey = CommercialPaper.makeKey([issuer, paperNumber]);
+        let paperKey = CommercialPaper.makeKey([paperNumber]);
         let paper = await ctx.paperList.getPaper(paperKey);
 
-        // Validate current owner
-        if (paper.getOwner() !== currentOwner) {
-            throw new Error('Paper ' + issuer + paperNumber + ' is not owned by ' + currentOwner);
+        if (!paper.isOffered()) {
+            throw new Error('Paper ' + paperNumber + ' is not in OFFERED state. Current state = ' + paper.getCurrentState());
         }
+
+        let bid = Bid.createInstance(paperNumber, bidder, bidDateTime, price, quantity);
+
+        await ctx.bidList.addBid(bid);
+
+        return bid;
+    }
+
+    async issue(ctx, paperNumber, issueDateTime) {
+
+        // Retrieve the current paper using key fields provided
+        let paperKey = CommercialPaper.makeKey([paperNumber]);
+        let paper = await ctx.paperList.getPaper(paperKey);
+
+        if (!paper.isOffered()) {
+            throw new Error('Paper ' + paperNumber + ' is not in OFFERED state. Current state = ' + paper.getCurrentState());
+        }
+
+        // Smart contract, rather than paper, moves paper into ISSUED state
+        paper.setIssued(issueDateTime);
+        await ctx.paperList.updatePaper(paper);
+
+        // Get all bids for current paper
+        let bids = await ctx.bidList.getBidsByPaper(paperNumber);
+
+        // Sort bids by price descendent
+        bids.sort((a, b) => b.price - a.price);
+
+        // Collect required quantity bid by bid
+        let needQuantity = paper.getQuantity();
+
+        let accounts = new Map();
+        let finalPrice = 0;
+
+        bids.forEach(bid => {
+            if (needQuantity <= 0) return;
+
+            let bidQuantity = bid.getQuantity();
+
+            let accountQuantity;
+            if (bidQuantity <= needQuantity) {
+                accountQuantity = bidQuantity;
+            } else {
+                accountQuantity = needQuantity;
+            }
+
+            needQuantity -= accountQuantity;
+
+            if (accounts.has(bid.bidder)) {
+                // Add balance to account
+                let account = accounts.get(bid.bidder);
+                account.quantity += accountQuantity;
+                accounts.set(bid.bidder, account);
+            } else {
+                // Create accounts with balance
+                let account = Account.createInstance(paperNumber, bid.bidder, accountQuantity);
+                accounts.set(bid.bidder, account);
+            }
+
+            finalPrice = bid.price;
+        });
+
+        // Save accounts
+        let accountsArray = [];
+        for (const account of accounts.values()) {
+            await ctx.accountList.addAccount(account);
+            accountsArray.push(account);
+        }
+
+        return {accounts: accountsArray, finalPrice};
+    }
+
+    async cancel(ctx, paperNumber, cancelDateTime) {
+
+        // Retrieve the current paper using key fields provided
+        let paperKey = CommercialPaper.makeKey([paperNumber]);
+        let paper = await ctx.paperList.getPaper(paperKey);
+
+        if (!paper.isOffered()) {
+            throw new Error('Paper ' + paperNumber + ' is not in OFFERED state. Current state = ' + paper.getCurrentState());
+        }
+
+        paper.setCanceled(cancelDateTime);
+
+        await ctx.paperList.updatePaper(paper);
+
+        return paper;
+    }
+
+    async buy(ctx, paperNumber, currentOwner, newOwner, purchaseDateTime, price, quantity) {
+
+        // Retrieve the current paper using key fields provided
+        let paperKey = CommercialPaper.makeKey([paperNumber]);
+        let paper = await ctx.paperList.getPaper(paperKey);
 
         // First buy moves state from ISSUED to TRADING
         if (paper.isIssued()) {
             paper.setTrading();
+            await ctx.paperList.updatePaper(paper);
         }
 
-        // Check paper is not already REDEEMED
-        if (paper.isTrading()) {
-            paper.setOwner(newOwner);
-        } else {
-            throw new Error('Paper ' + issuer + paperNumber + ' is not trading. Current state = ' +paper.getCurrentState());
+        if (!paper.isTrading()) {
+            throw new Error('Paper ' + paperNumber + ' is not trading. Current state = ' + paper.getCurrentState());
         }
 
-        // Update the paper
-        await ctx.paperList.updatePaper(paper);
-        return paper;
+        let sellerAccountKey = Account.makeKey([paperNumber, currentOwner]);
+        let sellerAccount = await ctx.accountList.getAccount(sellerAccountKey);
+
+        let buyerAccountKey = Account.makeKey([paperNumber, newOwner]);
+        let buyerAccount = await ctx.accountList.getAccount(buyerAccountKey);
+
+        quantity = parseInt(quantity);
+
+        if (sellerAccount.getQuantity() < quantity) {
+            throw new Error('Seller ' + currentOwner + ' does not have enough papers');
+        }
+
+        if (!buyerAccount) {
+            buyerAccount = Account.createInstance(newOwner, paperNumber, 0);
+        }
+
+        sellerAccount.subQuantity(quantity);
+        buyerAccount.addQuantity(quantity);
+
+        await ctx.accountList.updateAccount(sellerAccount);
+        await ctx.accountList.updateAccount(buyerAccount);
+
+        return {paper, quantity, sellerAccount, buyerAccount}
     }
 
-    /**
-     * Redeem commercial paper
-     *
-     * @param {Context} ctx the transaction context
-     * @param {String} issuer commercial paper issuer
-     * @param {Integer} paperNumber paper number for this issuer
-     * @param {String} redeemingOwner redeeming owner of paper
-     * @param {String} redeemDateTime time paper was redeemed
-    */
-    async redeem(ctx, issuer, paperNumber, redeemingOwner, redeemDateTime) {
+    async redeem(ctx, paperNumber, redeemerOwner, redeemDateTime, quantity) {
 
-        let paperKey = CommercialPaper.makeKey([issuer, paperNumber]);
-
+        let paperKey = CommercialPaper.makeKey([paperNumber]);
         let paper = await ctx.paperList.getPaper(paperKey);
 
-        // Check paper is not REDEEMED
-        if (paper.isRedeemed()) {
-            throw new Error('Paper ' + issuer + paperNumber + ' already redeemed');
+        let redeemerAccountKey = Account.makeKey([paperNumber, redeemerOwner]);
+        let redeemerAccount = await ctx.accountList.getAccount(redeemerAccountKey);
+
+        let issuerAccountKey = Account.makeKey([paperNumber, paper.getIssuer()]);
+        let issuerAccount = await ctx.accountList.getAccount(issuerAccountKey);
+
+        quantity = parseInt(quantity);
+
+        if (redeemerAccount.getQuantity() < quantity) {
+            throw new Error(redeemerOwner + ' does not have enough papers');
         }
 
-        // Verify that the redeemer owns the commercial paper before redeeming it
-        if (paper.getOwner() === redeemingOwner) {
-            paper.setOwner(paper.getIssuer());
-            paper.setRedeemed();
-        } else {
-            throw new Error('Redeeming owner does not own paper' + issuer + paperNumber);
+        if (!issuerAccount) {
+            issuerAccount = Account.createInstance(paperNumber, paper.getIssuer(), 0);
         }
 
-        await ctx.paperList.updatePaper(paper);
-        return paper;
+        redeemerAccount.subQuantity(quantity);
+        issuerAccount.addQuantity(quantity);
+
+        await ctx.accountList.updateAccount(redeemerAccount);
+        await ctx.accountList.updateAccount(issuerAccount);
+
+        return {paper, quantity, redeemerAccount, issuerAccount};
+    }
+
+    async listBids(ctx, paperNumber) {
+
+        // Get all bids for current paper
+        return await ctx.bidList.getBidsByPaper(paperNumber);
+    }
+
+    async listAccounts(ctx, paperNumber) {
+
+        // Get all accounts for current paper
+        return await ctx.accountList.getAccountsByPaper(paperNumber);
     }
 
 }
