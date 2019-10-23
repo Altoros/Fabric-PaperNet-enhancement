@@ -5,13 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 'use strict';
 
 // Utility class for ledger state
-const State = require('./../ledger-api/state.js');
+const State = require('../ledger-api/state.js');
 
 // Enumerate commercial paper state values
 const cpState = {
-    ISSUED: 1,
-    TRADING: 2,
-    REDEEMED: 3
+    OFFERED: 1,
+    ISSUED: 2,
+    TRADING: 3,
+    REDEEMED: 4,
+    CANCELED: 5
 };
 
 /**
@@ -21,13 +23,13 @@ const cpState = {
 class CommercialPaper extends State {
 
     constructor(obj) {
-        super(CommercialPaper.getClass(), [obj.issuer, obj.paperNumber]);
+        super(CommercialPaper.getClass(), [obj.paperNumber]);
         Object.assign(this, obj);
     }
 
     /**
      * Basic getters and setters
-    */
+     */
     getIssuer() {
         return this.issuer;
     }
@@ -36,19 +38,25 @@ class CommercialPaper extends State {
         this.issuer = newIssuer;
     }
 
-    getOwner() {
-        return this.owner;
-    }
-
-    setOwner(newOwner) {
-        this.owner = newOwner;
+    getQuantity() {
+        return parseInt(this.quantity);
     }
 
     /**
      * Useful methods to encapsulate commercial paper states
      */
-    setIssued() {
+    setOffered() {
+        this.currentState = cpState.OFFERED;
+    }
+
+    setIssued(issueDateTime) {
         this.currentState = cpState.ISSUED;
+        this.issueDateTime = issueDateTime;
+    }
+
+    setCanceled(cancelDateTime) {
+        this.currentState = cpState.CANCELED;
+        this.cancelDateTime = cancelDateTime;
     }
 
     setTrading() {
@@ -57,6 +65,10 @@ class CommercialPaper extends State {
 
     setRedeemed() {
         this.currentState = cpState.REDEEMED;
+    }
+
+    isOffered() {
+        return this.currentState === cpState.OFFERED;
     }
 
     isIssued() {
@@ -69,6 +81,10 @@ class CommercialPaper extends State {
 
     isRedeemed() {
         return this.currentState === cpState.REDEEMED;
+    }
+
+    isCanceled() {
+        return this.currentState === cpState.CANCELED;
     }
 
     static fromBuffer(buffer) {
@@ -90,8 +106,8 @@ class CommercialPaper extends State {
     /**
      * Factory method to create a commercial paper object
      */
-    static createInstance(issuer, paperNumber, issueDateTime, maturityDateTime, faceValue) {
-        return new CommercialPaper({ issuer, paperNumber, issueDateTime, maturityDateTime, faceValue });
+    static createInstance(issuer, paperNumber, issueDateTime, maturityDateTime, faceValue, quantity) {
+        return new CommercialPaper({issuer, paperNumber, issueDateTime, maturityDateTime, faceValue, quantity});
     }
 
     static getClass() {
